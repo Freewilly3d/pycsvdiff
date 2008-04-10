@@ -5,7 +5,7 @@
 #
 # The MIT License
 #
-# Copyright (c) 2008 Richard C. Harris
+# Copyright (c) 2008 Richard C. Harris (rconradharris<AT>gmail.com)
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -40,16 +40,18 @@ import unittest
 #
 ################################################################
 class Table(object):
-    def __init__(self, rows, fields=None, label_first_row=False):
+    def __init__(self, rows, fields=None, label_first_row=False,
+                 skipped_fields=None):
         """
         rows (iterator): something to yield rows like csv.reader
         fields (tuple): an optional set of field names. if ommitted,
             the fields will be auto-named with their field number.
-        label_first_row (bool): if the first row of data are actually
-            labels store those as the field schema
-	"""
+        label_first_row (bool): the first row represents field labels
+        skipped_fields (set): fields to skip when diffing
+        """
         self.label_first_row = label_first_row
         self.rows = rows
+        self.skipped_fields = skipped_fields or set()
         if fields:
             self.fields = fields
         else:
@@ -65,6 +67,7 @@ class Table(object):
                     for row in rows:
                         yield row
                 self.rows = _iter()
+
 
 class TableDiffer(object):
     """
@@ -88,35 +91,61 @@ class TableDiffer(object):
             there exists i such that a[u][i] != b[u][i] 
     """
     def __init__(self, table_a=None, table_b=None, 
-                 ignored_fields=None,
-                 verbosity=2):
+                 skipped_fields=None,
+                 verbosity=2,
+                 ignore_case=False,
+                 only_fields=None):
         """
         table_a (Table): first table
         table_b (Table): second table
-        ignore_fields (list): list of field numbers to ignore when diffing
+        ignore_fields (set): field numbers to ignore when diffing
         verbosity (int): used to selectively switch on pretty-printers
+        ignore_case (bool): make comparisons case insensitve
+        only_fields (set): only use these fields when comparing
         """
         self.table_a = table_a
         self.table_b = table_b
-        self.ignored_fields = ignored_fields or []
         self.difference_detected = False
         self.verbosity = verbosity
-
+        self.ignore_case = ignore_case
+                
+        all_fields = set(range(max(len(table_a.fields), len(table_b.fields))))
+        assert not (skipped_fields and only_fields)
+        if only_fields:
+            skipped_fields = all_fields - set(only_fields)
+        elif skipped_fields:
+            skipped_fields = set(skipped_fields)
+        else:
+            skipped_fields = set()
+            
+        table_a.skipped_fields = skipped_fields.copy()
+        table_b.skipped_fields = skipped_fields.copy()
+        
     def _diff_row(self, row_a, row_b):
         """ 
         row_a (iterable): first row to diff
         row_b (iterable): second row to diff
         Returns: tuple representing differences
         """
-        diffs = diff_seq_by_index(row_a, row_b)
-        ignored_fields = self.ignored_fields
-        added = [(i, y) for i, x, y in diffs 
-                 if x is nil and i not in ignored_fields]
-        deleted = [(i, x) for i, x, y in diffs 
-                   if y is nil and i not in ignored_fields]
+        def comparator(p, q):
+            if self.ignore_case:
+                return str(p).lower() == str(q).lower()
+            else:
+                return p == q
+        
+        diffs = diff_seq_by_index(row_a, row_b, cmp=comparator)
+        
+        # TODO: In order to allow different skip fields per table, must
+        # rewrite sequence differ. It will then also support out of order
+        # diffing which means I can add the --ignore-order option
+        def include_field(fieldnum):
+            return i not in self.table_a.skipped_fields
+            
+        added = [(i, y) for i, x, y in diffs if x is nil and include_field(i)]
+        deleted = [(i, x) for i, x, y in diffs if y is nil and include_field(i)]
         changed = [(i, x, y) for i, x, y in diffs 
                    if x is not nil and y is not nil 
-                   and i not in ignored_fields]						
+                   and include_field(i)]						
         if any([added, deleted, changed]):
             self.difference_detected = True
         return added, deleted, changed
@@ -225,6 +254,7 @@ class TableDiffer(object):
         else:
             self.pprint_row_diffs(out=out, indent=indent)
 
+
 class NilType(object):
     """
     Nil is a singleton used to distinguish between a value being equal to
@@ -234,9 +264,11 @@ class NilType(object):
         return "nil"
     __str__ = __repr__
 
+
 nil = NilType()
 
-def diff_seq_by_index(a, b):
+
+def diff_seq_by_index(a, b, cmp=lambda p, q: p == q):
     """
     a: iterable, b: iterable, returns: list of diff codes
 
@@ -249,6 +281,8 @@ def diff_seq_by_index(a, b):
             added:   i exists in b but not a              -> (i, nil, y)
             deleted: i exists in a but not b              -> (i, x, nil)
             changed: i exists in a and b but a[i] != b[i] -> (i, x, y)
+    
+    cmp(func): a comparator function you may override
     """
     a_, b_ = iter(a), iter(b)
     i = 0
@@ -265,9 +299,10 @@ def diff_seq_by_index(a, b):
         i += 1
         if x is nil and y is nil:
             break
-        elif x != y:			
+        elif not cmp(x, y):			
             diffs.append((i-1, x, y))		
     return diffs
+
 
 ################################################################
 #
@@ -281,12 +316,21 @@ def setup_options():
                       action="store_true",  
                       dest="label_first_row",
                       default=False,
-                      help="first row of data are field labels")
-    parser.add_option('-i', '--ignored-fields',
+                      help="first row of data represents field labels")
+    parser.add_option('-s', '--skip-fields',
                       action="store",  
-                      dest="ignored_fields",
-                      help="fields to ignore (comma separated, use"
+                      dest="skipped_fields",
+                      help="fields to skip (comma separated, use"
                            " @field_number or field_label if using -l)")
+    parser.add_option('-i', '--ignore-case',
+                      action="store_true",  
+                      dest="ignore_case",
+                      default=False,
+                      help="ignore case when comparing field names and data")
+    parser.add_option('-o', '--only-fields',
+                      action="store",  
+                      dest="only_fields",
+                      help="use only these fields (same syntax as skip)")
     parser.add_option('-v', '--verbosity',
                       action="store",
                       type="int", 
@@ -320,9 +364,7 @@ def get_files(args):
             fatal("file '%s' not found" % file)
     return file_a, file_b
 
-def parse_ignored_fields(options, table_a, table_b):
-    ignored_fields = options.ignored_fields
-
+def parse_fieldlist(fieldlist, table_a, table_b):
     def get_field_num(fieldname, table, table_num):
         matches = [(i, f) for i, f in enumerate(table.fields)
                    if f == fieldname]
@@ -335,24 +377,22 @@ def parse_ignored_fields(options, table_a, table_b):
         else:
             fatal("Field '%s' not found in table %i" % (fieldname, table_num))
 
-    if ignored_fields:
-        to_ignore = []
-        ignored_fields = ignored_fields.split(',')
-        ignored_fields = [i.strip() for i in ignored_fields]
-        for field in ignored_fields:
+    if fieldlist:
+        fieldset = set()
+        for field in [i.strip() for i in fieldlist.split(',')]:
             if field.startswith('@'):
                 field = field.lstrip('@')
                 try:
                     field = int(field)
                 except ValueError:
                     fatal("Unable to parse field number '%s'" % field)
-                to_ignore.append(field)
+                fieldset.add(field)
             elif field:
                 field_num_a = get_field_num(field, table_a, 1)
                 field_num_b = get_field_num(field, table_b, 2)
                 assert field_num_a == field_num_b
-                to_ignore.append(field_num_a)
-        return to_ignore
+                fieldset.add(field_num_a)
+        return fieldset
 
 def run_tests():
     loader = unittest.defaultTestLoader
@@ -373,10 +413,14 @@ def main():
     table_b = get_table_from_csv(open(file_b, "rb"), 
                                  label_first_row=options.label_first_row)
 
-    ignored_fields = parse_ignored_fields(options, table_a, table_b)
+    skipped_fields = parse_fieldlist(options.skipped_fields, table_a, 
+                                     table_b)
+    only_fields = parse_fieldlist(options.only_fields, table_a, table_b)
     differ = TableDiffer(table_a, table_b, 
-                         ignored_fields=ignored_fields,
-                         verbosity=options.verbosity)
+                         skipped_fields=skipped_fields,
+                         verbosity=options.verbosity,
+                         ignore_case=options.ignore_case,
+                         only_fields=only_fields)
     differ.pprint_diff()
     return int(differ.difference_detected)
     
@@ -394,6 +438,7 @@ class TestTable(unittest.TestCase):
         t = Table(rows, fields=myfields)
         self.assertEqual(t.fields, myfields)
 
+
 class TestDiffSeqByIndex(unittest.TestCase):
     def assertDiff(self, a, b, expected):
         self.assertEqual(list(diff_seq_by_index(a, b)), expected)
@@ -408,6 +453,7 @@ class TestDiffSeqByIndex(unittest.TestCase):
     def test_added_changed(self):
         self.assertDiff([1, 2, 3], [1, 2, 4, 5], 
                         [(2, 3, 4), (3, nil, 5)])
+
 
 class TestTableDifferDiffFields(unittest.TestCase):
     def assertFieldDiffs(self, table_a, table_b, added, deleted, changed):
@@ -433,6 +479,7 @@ class TestTableDifferDiffFields(unittest.TestCase):
         table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
         table_b = Table(rows=[("a", "b", "c", "d")], fields=(1, 2, 4, 5))
         self.assertFieldDiffs(table_a, table_b, [(3, 5)], [], [(2, 3, 4)])
+
 
 class TestTableDifferDiffRows(unittest.TestCase):
     def assertRowDiffs(self, table_a, table_b, expected):
@@ -471,6 +518,7 @@ class TestTableDifferDiffRows(unittest.TestCase):
                               [(2, "c", "d")]),
                               ("added", 1, ("e", "f", "g"))])
 
+
 class TestTableDifferPPrintDiff(unittest.TestCase):
     def assertPPrintDiff(self, table_a, table_b, expected):
         out = StringIO.StringIO()
@@ -504,6 +552,81 @@ class TestTableDifferPPrintDiff(unittest.TestCase):
         expected = "Row 0 changed\n    Value in field '3' changed: 'c' -> 'd'\n--------------------------------------------------\nRow 1 added\n('e', 'f', 'g')\n--------------------------------------------------\n"
         self.assertPPrintDiff(table_a, table_b, expected)
 
+
+class TestTableDifferSkippedFields(unittest.TestCase):
+    def assertFieldDiffs(self, table_a, table_b, added, deleted, changed,
+                         skipped_fields=None):
+        differ = TableDiffer(table_a, table_b, skipped_fields=skipped_fields)
+        self.assertEqual(differ.diff_fields(), (added, deleted, changed))
+    def test_same(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        self.assertFieldDiffs(table_a, table_b, [], [], [])
+    def test_added(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "c", "d")], fields=(1, 2, 3, 4))
+        self.assertFieldDiffs(table_a, table_b, [], [], [],
+                              skipped_fields=[3])
+    def test_deleted(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b")], fields=(1, 2))
+        self.assertFieldDiffs(table_a, table_b, [], [], [],
+                              skipped_fields=[2])
+    def test_changed(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "c")], fields=(1, 2, 4))
+        self.assertFieldDiffs(table_a, table_b, [], [], [],
+                              skipped_fields=[2])
+    def test_added_changed(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "c", "d")], fields=(1, 2, 4, 5))
+        self.assertFieldDiffs(table_a, table_b, [], [], [(2, 3, 4)],
+                              skipped_fields=[3]) 
+        self.assertFieldDiffs(table_a, table_b, [], [], [],
+                              skipped_fields=[2, 3]) 
+
+                              
+class TestTableDifferIgnoreCase(unittest.TestCase):
+    def assertRowDiffs(self, table_a, table_b, expected):
+        differ = TableDiffer(table_a, table_b, ignore_case=True)
+        results = list(differ.diff_rows())
+        self.assertEqual(results, expected)	
+    def test_same(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "C")], fields=(1, 2, 3))
+        self.assertRowDiffs(table_a, table_b, [])
+
+class TestTableDifferOnlyFields(unittest.TestCase):
+    def assertFieldDiffs(self, table_a, table_b, added, deleted, changed,
+                         only_fields=None):
+        differ = TableDiffer(table_a, table_b, only_fields=only_fields)
+        self.assertEqual(differ.diff_fields(), (added, deleted, changed))
+    def test_same(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        self.assertFieldDiffs(table_a, table_b, [], [], [], 
+                              only_fields=set([1]))
+    def test_added(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "c", "d")], fields=(1, 2, 3, 4))
+        self.assertFieldDiffs(table_a, table_b, [], [], [],
+                              only_fields=set([1]))
+    def test_deleted(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b")], fields=(1, 2))
+        self.assertFieldDiffs(table_a, table_b, [], [(2, 3)], [],
+                              only_fields=set([2]))
+    def test_changed(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "c")], fields=(1, 2, 4))
+        self.assertFieldDiffs(table_a, table_b, [], [], [(2, 3, 4)],
+                              only_fields=set([1, 2]))
+    def test_added_changed(self):
+        table_a = Table(rows=[("a", "b", "c")], fields=(1, 2, 3))
+        table_b = Table(rows=[("a", "b", "c", "d")], fields=(1, 2, 4, 5))
+        self.assertFieldDiffs(table_a, table_b, [], [], [(2, 3, 4)],
+                              only_fields=set([2]))
+    
 ################################################################
 #
 #                          Entry Point
