@@ -44,7 +44,7 @@ class Table(object):
         """
         rows (iterator): something to yield rows like csv.reader
         fields (tuple): an optional set of field names. if ommitted,
-            the fields will be autonamed "field i" where i in 0 .. n
+            the fields will be auto-named with their field number.
         label_first_row (bool): if the first row of data are actually
             labels store those as the field schema
 	"""
@@ -87,19 +87,27 @@ class TableDiffer(object):
         changed a[u] != b[u] which means that:
             there exists i such that a[u][i] != b[u][i] 
     """
-    def __init__(self, table_a=None, table_b=None, ignored_fields=None):
+    def __init__(self, table_a=None, table_b=None, 
+                 ignored_fields=None,
+                 verbosity=2):
+        """
+        table_a (Table): first table
+        table_b (Table): second table
+        ignore_fields (list): list of field numbers to ignore when diffing
+        verbosity (int): used to selectively switch on pretty-printers
+        """
         self.table_a = table_a
         self.table_b = table_b
         self.ignored_fields = ignored_fields or []
         self.difference_detected = False
-
-    def diff(self):
-        for field_diff in self.diff_fields():
-            yield field_diff
-        for row_diff in self.diff_rows():
-            yield row_diff
+        self.verbosity = verbosity
 
     def _diff_row(self, row_a, row_b):
+        """ 
+        row_a (iterable): first row to diff
+        row_b (iterable): second row to diff
+        Returns: tuple representing differences
+        """
         diffs = diff_seq_by_index(row_a, row_b)
         ignored_fields = self.ignored_fields
         added = [(i, y) for i, x, y in diffs 
@@ -117,6 +125,10 @@ class TableDiffer(object):
         return self._diff_row(self.table_a.fields, self.table_b.fields)
 
     def diff_rows(self):
+        """
+        Iterates over rows in both tables in order to diff them
+        Returns: Yields tuple representing row differences
+        """
         a = iter(self.table_a.rows)
         b = iter(self.table_b.rows)
         i = 0
@@ -145,17 +157,18 @@ class TableDiffer(object):
                 if values_changed:
                     yield "changed", i-1, x, y, values_changed
 
-
-    @staticmethod
-    def output(data, out=sys.stdout, indent=0):
-        print >>out, " " * indent + data
-
+    def output(self, data, out=sys.stdout, indent=0, verbosity=2):
+        if self.verbosity >= verbosity:
+            print >>out, " " * indent + data
+        
     def pprint_value_changed(self, value_changed, out=sys.stdout,
                              indent=0):
+        def output(data, out=out, indent=indent, verbosity=2):
+            return self.output(data, out=out, indent=indent, 
+                               verbosity=verbosity)
         i, x, y = value_changed
         field = self.table_a.fields[i]
-        self.output("Value in field '%s' changed: '%s' -> '%s'" 
-                    % (field, x, y), out=out, indent=indent)
+        output("Value in field '%s' changed: '%s' -> '%s'" % (field, x, y))
 
     def pprint_values_changed(self, values_changed, out=sys.stdout, 
                               indent=0):
@@ -163,38 +176,46 @@ class TableDiffer(object):
             self.pprint_value_changed(value_changed, out=out, indent=indent)
 
     def pprint_row_diff(self, row_diff, out=sys.stdout, indent=0):
+        def output(data, out=out, indent=indent, verbosity=1):
+            return self.output(data, out=out, indent=indent, 
+                               verbosity=verbosity)
+           
         tag = row_diff[0]
         if tag == "added":
             _, i, row = row_diff
-            self.output("Row %i added" %i, out=out, indent=indent)
-            self.output(pprint.pformat(row), out=out, indent=indent)
+            output("Row %i added" %i)
+            output(pprint.pformat(row))
         elif tag == "deleted":
             _, i, row = row_diff
-            self.output("Row %i deleted" %i, out=out, indent=indent)
-            self.output(pprint.pformat(row), out=out, indent=indent)
+            output("Row %i deleted" %i)
+            output(pprint.pformat(row))
         elif tag == "changed":
             _, i, row_a, row_b, values_changed = row_diff
-            self.output("Row %i changed" %i, out=out, indent=indent)
+            output("Row %i changed" %i, out=out, indent=indent)
             self.pprint_values_changed(values_changed, out=out, 
                                        indent=indent+4)
         else:
             raise Exception("Unknown diff tag \"%s\"" % tag)
-        print >>out, "-" * 50
+        output("-" * 50, verbosity=2)
 
     def pprint_row_diffs(self, out=sys.stdout, indent=0):
         for row_diff in self.diff_rows():
             self.pprint_row_diff(row_diff, out=out, indent=indent)
 
     def pprint_field_diffs(self, out=sys.stdout, indent=0):
+        def output(data, out=out, indent=indent, verbosity=1):
+            return self.output(data, out=out, indent=indent, 
+                               verbosity=verbosity)
+        
         added, deleted, changed = self.diff_fields()
         for x in added:
-            self.output("Field '%s' added" % x, out=out, indent=indent)
+            output("Field '%s' added" % x)
         for x in deleted:
-            self.output("Field '%s' deleted" % x, out=out, indent=indent)
+            output("Field '%s' deleted" % x)
         for x in changed:
             _, old, new = x
-            self.output("Field changed: '%s' -> '%s'" % (old, new),
-                        out=out, indent=indent)
+            output("Field changed: '%s' -> '%s'" % (old, new))
+
         return added, deleted, changed
 
     def pprint_diff(self, out=sys.stdout, indent=0):
@@ -266,6 +287,12 @@ def setup_options():
                       dest="ignored_fields",
                       help="fields to ignore (comma separated, use"
                            " @field_number or field_label if using -l)")
+    parser.add_option('-v', '--verbosity',
+                      action="store",
+                      type="int", 
+                      dest="verbosity",
+                      default=2,
+                      help="level of verbosity to use (default: 2)")
     parser.add_option('--run-tests',
                       action="store_true",  
                       dest="run_tests",
@@ -286,9 +313,12 @@ def fatal(data, errcode=1, out=sys.stderr):
     print >>out, data
     sys.exit(errcode)
 
-def check_file(file):
-    if not os.path.exists(file):
-        fatal("file '%s' not found" % file)
+def get_files(args):
+    file_a, file_b = args
+    for file in (file_a, file_b):
+        if not os.path.exists(file):
+            fatal("file '%s' not found" % file)
+    return file_a, file_b
 
 def parse_ignored_fields(options, table_a, table_b):
     ignored_fields = options.ignored_fields
@@ -335,9 +365,8 @@ def main():
     options, args = setup_options()
     if options.run_tests:
         return run_tests()
-    file_a, file_b = args
-    check_file(file_a)
-    check_file(file_b)
+    
+    file_a, file_b = get_files(args)
 
     table_a = get_table_from_csv(open(file_a, "rb"), 
                                  label_first_row=options.label_first_row)
@@ -345,10 +374,11 @@ def main():
                                  label_first_row=options.label_first_row)
 
     ignored_fields = parse_ignored_fields(options, table_a, table_b)
-    differ = TableDiffer(table_a, table_b, ignored_fields=ignored_fields)
+    differ = TableDiffer(table_a, table_b, 
+                         ignored_fields=ignored_fields,
+                         verbosity=options.verbosity)
     differ.pprint_diff()
     return int(differ.difference_detected)
-
     
 ################################################################
 #
