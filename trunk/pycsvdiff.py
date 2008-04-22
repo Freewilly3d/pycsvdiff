@@ -46,6 +46,10 @@ class Table(object):
         fields (tuple): an optional set of field names. if ommitted,
             the fields will be auto-named with their field number.
         label_first_row (bool): the first row represents field labels
+
+        The sigil '@' is used to represent fields that have been auto-named
+        with their field number. It is also used by --skipped-fields and
+        --only-fields to distinguish between field numbers and field labels.
         """
         self.label_first_row = label_first_row
         self.rows = rows
@@ -56,7 +60,7 @@ class Table(object):
             if label_first_row:
                 self.fields = tuple(peek)
             else:
-                fieldnames = map(lambda i: "%i" % i, range(len(peek)))
+                fieldnames = map(lambda i: "@%i" % i, range(len(peek)))
                 self.fields = tuple(fieldnames)
                 # Put the peeked value back into the stream
                 def _iter():
@@ -85,6 +89,7 @@ class TableDiffer(object):
         added   v indexes table_b's rows, v > len(table_a's rows) 
         deleted u indexes table_a's rows, u > len(table_b's rows)
         changed a[u] != b[u] which means that:
+
             there exists i such that a[u][i] != b[u][i] 
     """
     def __init__(self, table_a=None, table_b=None, 
@@ -101,7 +106,7 @@ class TableDiffer(object):
         verbosity (int): used to selectively switch on pretty-printers
         ignore_case (bool): make comparisons case insensitve
         only_fields (set): only use these fields when comparing
-        ignore_order (bool): if tables are labeled then a between fields can
+        ignore_order (bool): if tables are labeled then a mapping between fields can
             be established so order can be ignored
         """
         self.table_a = table_a
@@ -153,9 +158,6 @@ class TableDiffer(object):
                                   skip=lambda i: i in self.skipped_fields,
                                   mapping=mapping)
         
-        # TODO: In order to allow different skip fields per table, must
-        # rewrite sequence differ. It will then also support out of order
-        # diffing which means I can add the --ignore-order option
         added = [(i, y) for i, x, y in diffs if x is nil]
         deleted = [(i, x) for i, x, y in diffs if y is nil]
         changed = [(i, x, y) for i, x, y in diffs 
@@ -175,9 +177,6 @@ class TableDiffer(object):
         a = iter(self.table_a.rows)
         b = iter(self.table_b.rows)
         i = 0
-        added = []
-        deleted = []
-        changed = []
         while True:
             try:
                 x = a.next()
@@ -302,6 +301,9 @@ def diff_seq_by_index(a, b,
             added:   i exists in b but not a              -> (i, nil, y)
             deleted: i exists in a but not b              -> (i, x, nil)
             changed: i exists in a and b but a[i] != b[i] -> (i, x, y)
+
+    I am not positive, but I think this basic approach was inspired by 
+    a recipe I saw by Jim Baker (he called nil NoneType).
     """
     mapping = set(mapping or [])
     # Convert tuple to bi-directional mapping in dict form
@@ -438,11 +440,11 @@ def run_tests():
 
 def main():
     options, args = setup_options()
+
     if options.run_tests:
         return run_tests()
     
     file_a, file_b = get_files(args)
-
     table_a = get_table_from_csv(open(file_a, "rb"), 
                                  label_first_row=options.label_first_row)
     table_b = get_table_from_csv(open(file_b, "rb"), 
@@ -451,13 +453,18 @@ def main():
     skipped_fields = parse_fieldlist(options.skipped_fields, table_a, 
                                      table_b)
     only_fields = parse_fieldlist(options.only_fields, table_a, table_b)
+    
     differ = TableDiffer(table_a, table_b, 
                          skipped_fields=skipped_fields,
                          verbosity=options.verbosity,
                          ignore_case=options.ignore_case,
                          only_fields=only_fields,
                          ignore_order=options.ignore_order)
+    
+    # Diff the tables and pretty print the results to stdout 
     differ.pprint_diff()
+    
+    # 0 means no-difference/tests passed, 1 means differences/tests failed
     return int(differ.difference_detected)
     
 ################################################################
@@ -466,13 +473,12 @@ def main():
 #
 ################################################################
 class TestTable(unittest.TestCase):
-    def test_fieldnames(self):
-        rows = [(1,2,3), (4,5,6)]
-        t = Table(rows)
-        self.assertEqual(t.fields, ("0", "1", "2"))
-        myfields = ("id", "name", "occupation")
-        t = Table(rows, fields=myfields)
-        self.assertEqual(t.fields, myfields)
+    def test_autonamed_fields(self):
+        t = Table(rows=[(1,2,3), (4,5,6)])
+        self.assertEqual(t.fields, ("@0", "@1", "@2"))
+    def test_named_fields(self):
+        t = Table(rows=[(1,2,3), (4,5,6)], fields=("id", "name", "occupation"))
+        self.assertEqual(t.fields, ("id", "name", "occupation"))
 
 class TestDiffSeqByIndex(unittest.TestCase):
     def assertDiff(self, a, b, expected):
@@ -510,8 +516,6 @@ class TestDiffSeqByIndexMapping(unittest.TestCase):
                         [(2, 3, 4), (3, nil, 5)],
                         mapping=[])
         
-        
-
 class TestTableDifferDiffFields(unittest.TestCase):
     def assertFieldDiffs(self, table_a, table_b, added, deleted, changed):
         self.assertEqual(TableDiffer(table_a, table_b).diff_fields(),
